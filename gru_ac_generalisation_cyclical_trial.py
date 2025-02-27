@@ -299,22 +299,33 @@ if __name__ == "__main__":
         if order not in training_reward_orders:
             training_reward_orders.append(order)
     
+    with open("training_reward_orders.txt", "w") as f:
+        for order in training_reward_orders:
+            f.write(f"{order}\n")
+
     train_env = GridMazeEnv(reward_orders=training_reward_orders, training=True, max_steps=200)
-    model = ActorCritic(input_size=15, hidden_size=128, num_actions=4)
+    model = ActorCritic(input_size=15, hidden_size=200, num_actions=4)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     
-    num_episodes = 10000
+    num_episodes = 25_000
     episode_rewards = train_agent(train_env, model, optimizer, num_episodes=num_episodes, gamma=0.99)
-    
+    np.save("episode_rewards.npy", episode_rewards)
+    torch.save(model.state_dict(), "gru_actor_critic_gridmaze.pth")
     # Plot reward per episode.
     plt.figure(figsize=(8, 4))
-    plt.plot(episode_rewards)
+    plt.plot(episode_rewards, label='Total Reward')
+    
+    # Compute and plot rolling average.
+    rolling_avg = np.convolve(episode_rewards, np.ones(200)/200, mode='valid')
+    plt.plot(range(199, len(episode_rewards)), rolling_avg, color='red', label='Rolling Average (200 episodes)')
+    
     plt.xlabel("Episode")
     plt.ylabel("Total Reward")
     plt.title("Reward over Episodes (Training)")
+    plt.legend()
     plt.grid(True)
+    plt.savefig("training_rewards_plot.png")
     plt.show()
-    
     # ------------------------------
     # Test Sessions on Unseen Reward Orders
     # ------------------------------
@@ -325,6 +336,10 @@ if __name__ == "__main__":
         if order not in training_reward_orders and order not in unseen_orders:
             unseen_orders.append(order)
     print("Unseen Test Reward Orders:", unseen_orders)
+
+    with open("unseen_test_reward_orders.txt", "w") as f:
+        for order in unseen_orders:
+            f.write(f"{order}\n")
     
     test_results = []
     # Run 5 test sessions.
