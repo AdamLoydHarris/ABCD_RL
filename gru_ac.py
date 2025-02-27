@@ -206,7 +206,7 @@ def train_agent(env, model, optimizer, num_episodes=1000, gamma=0.99):
 
 if __name__ == "__main__":
     # Create environment and model.
-    env = GridMazeEnv(max_steps=50)
+    env = GridMazeEnv(max_steps=200)
     model = ActorCritic(input_size=14, hidden_size=128, num_actions=4)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     
