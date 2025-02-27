@@ -252,7 +252,7 @@ if __name__ == "__main__":
             training_reward_orders.append(order)
     
     # Create training environment.
-    train_env = GridMazeEnv(reward_orders=training_reward_orders, training=True, max_steps=200)
+    train_env = GridMazeEnv(reward_orders=training_reward_orders, training=True, max_steps=50)
     
     # Instantiate the model and optimizer.
     model = ActorCritic(input_size=15, hidden_size=128, num_actions=4)
