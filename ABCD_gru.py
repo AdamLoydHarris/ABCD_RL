@@ -6,37 +6,36 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import matplotlib.pyplot as plt
-
+import pickle
 # ------------------------------
 # Environment Definition
 # ------------------------------
 class GridMazeEnv(gym.Env):
     """
     A 3x3 grid maze where the agent must collect rewards in a cyclic order.
-    The rewards are given according to a reward order (a list of 4 unique cell indices)
-    that the agent must follow in order: A, B, C, D, and then cycle back to A.
+    The task (list of 4 unique cells) is followed cyclically: A, B, C, D, then back to A.
     
-    The observation is now a 15-dimensional vector:
+    The observation is a 15-dimensional vector:
       - 9 dims: one-hot encoding of the current location.
       - 4 dims: one-hot encoding of the previous action.
       - 1 dim: binary flag indicating whether a reward was just received.
       - 1 dim: buzzer flag indicating the start of a new trial.
       
-    During training, the environment randomly picks one of a set of reward orders.
-    At test time, a fixed (unseen) reward order is provided.
+    During training, a task is chosen at random from a set.
+    At test time, a fixed (unseen) reward order can be provided.
     """
     def __init__(self, reward_orders=None, training=True, fixed_reward_order=None, max_steps=200):
         super(GridMazeEnv, self).__init__()
         self.grid_size = 3            # 3x3 grid; cells 0-8 (row-major)
         self.num_cells = self.grid_size * self.grid_size
-        self.max_steps = max_steps    # Maximum steps per episode (e.g. simulating 20 minutes)
+        self.max_steps = max_steps    # e.g. simulating 20 minutes
         
         # Action space: 0=up, 1=down, 2=left, 3=right.
         self.action_space = spaces.Discrete(4)
         # Observation: 9 (location) + 4 (prev action) + 1 (reward flag) + 1 (buzzer) = 15 dims.
         self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(15,), dtype=np.float32)
         
-        # If no reward orders provided, generate 30 random orders (each order is a list of 4 unique cells).
+        # Generate 30 random tasks if none are provided.
         if reward_orders is None:
             self.all_reward_orders = []
             while len(self.all_reward_orders) < 30:
@@ -62,8 +61,8 @@ class GridMazeEnv(gym.Env):
         
         # Previous action: initially a zero vector (length 4).
         self.prev_action = np.zeros(4, dtype=np.float32)
-        self.last_reward = 0  # binary flag for whether reward was just received.
-        # Buzzer: set to 1 on reset (signalling the start of a new trial).
+        self.last_reward = 0  # binary flag for reward.
+        # Buzzer: 1 at the start of a new trial.
         self.buzzer = 1.0
         
         # Choose reward order.
@@ -94,7 +93,7 @@ class GridMazeEnv(gym.Env):
     
     def step(self, action):
         self.steps += 1
-        self.last_reward = 0  # reset reward flag at start of step
+        self.last_reward = 0  # reset reward flag
         
         # After the first step, turn off the buzzer.
         if self.steps > 1:
@@ -126,15 +125,15 @@ class GridMazeEnv(gym.Env):
         
         reward = 0.0
         reward_label = None
-        # Check if the agent is at the current target location.
+        # Check if agent is at the target.
         if cell == self.reward_order[self.current_goal_idx]:
             reward = 1.0
             self.last_reward = 1
             reward_label = self.label_mapping[self.current_goal_idx]
-            # Update cyclically: after D, go back to A.
+            # Cycle: after D, go back to A.
             self.current_goal_idx = (self.current_goal_idx + 1) % len(self.reward_order)
         
-        # Episode terminates only when max_steps is reached.
+        # Episode ends when maximum steps reached.
         done = self.steps >= self.max_steps
         info = {}
         if reward_label is not None:
@@ -154,7 +153,7 @@ class ActorCritic(nn.Module):
         self.critic = nn.Linear(hidden_size, 1)
     
     def forward(self, x, hidden):
-        # x: (batch_size, input_size) -> add time dimension.
+        # x: (batch_size, input_size); add time dimension.
         x = x.unsqueeze(1)
         out, new_hidden = self.gru(x, hidden)
         out = out.squeeze(1)
@@ -174,7 +173,7 @@ def train_agent(env, model, optimizer, num_episodes=1000, gamma=0.99):
     
     for episode in range(num_episodes):
         obs = env.reset()
-        obs = torch.from_numpy(obs).float().unsqueeze(0)
+        obs_tensor = torch.from_numpy(obs).float().unsqueeze(0)
         hidden = model.init_hidden(batch_size=1)
         done = False
         
@@ -183,21 +182,21 @@ def train_agent(env, model, optimizer, num_episodes=1000, gamma=0.99):
         rewards = []
         
         while not done:
-            logits, value, hidden = model(obs, hidden)
+            logits, value, hidden = model(obs_tensor, hidden)
             dist = torch.distributions.Categorical(logits=logits)
             action = dist.sample()
             log_prob = dist.log_prob(action)
             
             obs_next, reward, done, _ = env.step(action.item())
-            obs_next = torch.from_numpy(obs_next).float().unsqueeze(0)
+            obs_next_tensor = torch.from_numpy(obs_next).float().unsqueeze(0)
             
             log_probs.append(log_prob)
             values.append(value)
             rewards.append(reward)
             
-            obs = obs_next
+            obs_tensor = obs_next_tensor
         
-        # Compute cumulative discounted returns.
+        # Compute discounted returns.
         R = 0
         returns = []
         for r in rewards[::-1]:
@@ -226,46 +225,76 @@ def train_agent(env, model, optimizer, num_episodes=1000, gamma=0.99):
     return episode_rewards
 
 # ------------------------------
-# Evaluation & GRU Activation Recording
+# Evaluation Function: Record Detailed Timepoint Data
 # ------------------------------
 def evaluate_agent(env, model):
     """
-    Runs one test episode and returns:
-      - activations: a (T x hidden_size) array of GRU activations at each time step.
-      - reward_events: a list of tuples (time_step, reward_label) indicating when rewards occurred.
+    Runs one test episode and returns a list of dictionaries (one per time step).
+    Each dictionary contains:
+      - time: current time step index.
+      - activation: GRU hidden state (numpy array).
+      - observation: the raw observation vector (15 dims).
+      - location: decoded from the first 9 dims (index of active cell).
+      - past_action: decoded from the next 4 dims (index; -1 if no action).
+      - reward_flag: the binary reward flag (from obs).
+      - buzzer: the buzzer flag (from obs).
+      - reward: the reward received after the action.
+      - reward_label: (if any) the label (A, B, C, or D).
     """
     model.eval()
     obs = env.reset()
-    obs = torch.from_numpy(obs).float().unsqueeze(0)
+    obs_tensor = torch.from_numpy(obs).float().unsqueeze(0)
     hidden = model.init_hidden(batch_size=1)
     done = False
-    hidden_states = []
-    reward_events = []  # list of (time step, reward label)
+    timepoint_data = []
     t = 0
+    
     while not done:
-        logits, value, hidden = model(obs, hidden)
-        # Record hidden state (shape: [hidden_size])
-        hidden_states.append(hidden.detach().cpu().numpy()[0, 0, :].copy())
+        logits, value, hidden = model(obs_tensor, hidden)
+        activation = hidden.detach().cpu().numpy()[0, 0, :].copy()
+        
+        # Decode observation:
+        # Observation: [location (9), past_action (4), reward_flag (1), buzzer (1)]
+        obs_np = obs.copy()
+        location = int(np.argmax(obs_np[:9]))
+        if np.sum(obs_np[9:13]) == 0:
+            past_action = -1
+        else:
+            past_action = int(np.argmax(obs_np[9:13]))
+        reward_flag = float(obs_np[13])
+        buzzer = float(obs_np[14])
+        
+        current_data = {
+            "time": t,
+            "activation": activation,
+            "observation": obs_np.copy(),
+            "location": location,
+            "past_action": past_action,
+            "reward_flag": reward_flag,
+            "buzzer": buzzer
+        }
+        
         action = torch.distributions.Categorical(logits=logits).sample()
-        obs, reward, done, info = env.step(action.item())
-        if reward > 0:
-            reward_label = info.get('reward_label', '')
-            reward_events.append((t, reward_label))
-        obs = torch.from_numpy(obs).float().unsqueeze(0)
+        obs_next, reward, done, info = env.step(action.item())
+        current_data["reward"] = reward
+        current_data["reward_label"] = info.get('reward_label', None)
+        
+        timepoint_data.append(current_data)
+        obs = obs_next
+        obs_tensor = torch.from_numpy(obs).float().unsqueeze(0)
         t += 1
-    return np.array(hidden_states), reward_events
+    return timepoint_data
 
 # ------------------------------
 # Plotting Function for Test Sessions
 # ------------------------------
 def plot_test_session(activations, reward_events, unit_order=None, session_idx=0):
     """
-    Plots a heatmap of GRU activations (with units rank-ordered if provided)
-    and overlays vertical lines at time bins where rewards occurred.
+    Plots a heatmap of GRU activations (rank-ordered if unit_order is provided)
+    and overlays vertical lines for reward events.
     
-    Reward color coding: A - red, B - yellow, C - green, D - blue.
+    Reward colors: A - red, B - yellow, C - green, D - blue.
     """
-    # If a specific ordering is provided, reorder columns.
     if unit_order is not None:
         activations = activations[:, unit_order]
     
@@ -274,23 +303,19 @@ def plot_test_session(activations, reward_events, unit_order=None, session_idx=0
     plt.xlabel("Time Step")
     plt.ylabel("GRU Unit (Rank-ordered)")
     plt.title(f"Test Session {session_idx+1} - GRU Activations")
-    cbar = plt.colorbar(label='Activation')
+    plt.colorbar(label='Activation')
     
-    # Define colors for each reward.
     reward_colors = {'A': 'red', 'B': 'yellow', 'C': 'green', 'D': 'blue'}
     for t, label in reward_events:
         if label in reward_colors:
             plt.axvline(x=t, color=reward_colors[label], linestyle='--', linewidth=2)
-    
     plt.show()
 
 # ------------------------------
 # Main Script
 # ------------------------------
 if __name__ == "__main__":
-    # ------------------------------
-    # Training Setup
-    # ------------------------------
+    # Training Setup:
     num_training_orders = 30
     training_reward_orders = []
     num_cells = 9
@@ -298,24 +323,27 @@ if __name__ == "__main__":
         order = random.sample(range(num_cells), 4)
         if order not in training_reward_orders:
             training_reward_orders.append(order)
-    
-    with open("training_reward_orders.txt", "w") as f:
+
+    with open("gru_outputs/training_tasks.txt", "w") as f:
         for order in training_reward_orders:
             f.write(f"{order}\n")
-
+    
     train_env = GridMazeEnv(reward_orders=training_reward_orders, training=True, max_steps=200)
-    model = ActorCritic(input_size=15, hidden_size=200, num_actions=4)
+    model = ActorCritic(input_size=15, hidden_size=128, num_actions=4)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     
-    num_episodes = 25_000
+    num_episodes = 50_000
     episode_rewards = train_agent(train_env, model, optimizer, num_episodes=num_episodes, gamma=0.99)
-    np.save("episode_rewards.npy", episode_rewards)
-    torch.save(model.state_dict(), "gru_actor_critic_gridmaze.pth")
-    # Plot reward per episode.
+
+    torch.save(model.state_dict(), "gru_outputs/gru_actor_critic_ABCD.pth")
+
+    # Save episode rewards to a file.
+    np.save("gru_outputs/episode_rewards.npy", episode_rewards)
+
+    # Plot training reward over episodes.
     plt.figure(figsize=(8, 4))
-    plt.plot(episode_rewards, label='Total Reward')
+    plt.plot(episode_rewards, label='Total Reward', c='gray', linewidth=0.5)
     
-    # Compute and plot rolling average.
     rolling_avg = np.convolve(episode_rewards, np.ones(200)/200, mode='valid')
     plt.plot(range(199, len(episode_rewards)), rolling_avg, color='red', label='Rolling Average (200 episodes)')
     
@@ -324,20 +352,20 @@ if __name__ == "__main__":
     plt.title("Reward over Episodes (Training)")
     plt.legend()
     plt.grid(True)
-    plt.savefig("training_rewards_plot.png")
+    plt.savefig("gru_outputs/training_rewards_plot.svg")
     plt.show()
     # ------------------------------
-    # Test Sessions on Unseen Reward Orders
+    # Test Sessions on Unseen tasks
     # ------------------------------
-    # Generate 5 unseen reward orders (that are not in the training set).
+    # Generate 5 unseen tasks (not in the training set).
     unseen_orders = []
     while len(unseen_orders) < 5:
         order = random.sample(range(num_cells), 4)
         if order not in training_reward_orders and order not in unseen_orders:
             unseen_orders.append(order)
     print("Unseen Test Reward Orders:", unseen_orders)
-
-    with open("unseen_test_reward_orders.txt", "w") as f:
+    
+    with open("gru_outputs/test_tasks.txt", "w") as f:
         for order in unseen_orders:
             f.write(f"{order}\n")
     
@@ -346,16 +374,29 @@ if __name__ == "__main__":
     for idx, test_order in enumerate(unseen_orders):
         test_env = GridMazeEnv(reward_orders=training_reward_orders, training=False,
                                fixed_reward_order=test_order, max_steps=200)
-        activations, reward_events = evaluate_agent(test_env, model)
-        test_results.append({'activations': activations, 'reward_events': reward_events})
+        # Get detailed timepoint data.
+        timepoint_data = evaluate_agent(test_env, model)
+        test_results.append(timepoint_data)
     
-    # Rank order the GRU units based on the first test session.
-    first_activations = test_results[0]['activations']  # shape: (T, hidden_size)
-    # For each unit, find the time index of its peak activation.
+    # For each session, extract activations and reward events.
+    sessions_activations = []
+    sessions_reward_events = []
+    for session in test_results:
+        activations = np.array([tp['activation'] for tp in session])
+        reward_events = [(tp['time'], tp['reward_label']) for tp in session if tp['reward'] > 0]
+        sessions_activations.append(activations)
+        sessions_reward_events.append(reward_events)
+    
+    # Rank order GRU units by peak activation time in the first test session.
+    first_activations = sessions_activations[0]  # shape: (T, hidden_size)
     peak_times = np.argmax(first_activations, axis=0)
-    # Get sort order of units based on peak time.
     unit_order = np.argsort(peak_times)
     
-    # Plot each test session heatmap with reward markers.
-    for idx, result in enumerate(test_results):
-        plot_test_session(result['activations'], result['reward_events'], unit_order=unit_order, session_idx=idx)
+    # Plot heatmaps for each test session using the same unit order.
+    for idx, (acts, events) in enumerate(zip(sessions_activations, sessions_reward_events)):
+        plot_test_session(acts, events, unit_order=unit_order, session_idx=idx)
+    
+    # Optionally, save the detailed test data for future analysis.
+
+    with open("gru_outputs/test_sessions_data.pkl", "wb") as f:
+        pickle.dump(test_results, f)
