@@ -316,7 +316,7 @@ def plot_test_session(activations, reward_events, unit_order=None, session_idx=0
 # ------------------------------
 if __name__ == "__main__":
     # Training Setup:
-    num_training_orders = 30
+    num_training_orders = 40
     training_reward_orders = []
     num_cells = 9
     while len(training_reward_orders) < num_training_orders:
@@ -329,10 +329,10 @@ if __name__ == "__main__":
             f.write(f"{order}\n")
     
     train_env = GridMazeEnv(reward_orders=training_reward_orders, training=True, max_steps=200)
-    model = ActorCritic(input_size=15, hidden_size=128, num_actions=4)
+    model = ActorCritic(input_size=15, hidden_size=256, num_actions=4)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     
-    num_episodes = 50_000
+    num_episodes = 100_000
     episode_rewards = train_agent(train_env, model, optimizer, num_episodes=num_episodes, gamma=0.99)
 
     torch.save(model.state_dict(), "gru_outputs/gru_actor_critic_ABCD.pth")
