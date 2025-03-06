@@ -152,6 +152,8 @@ class ActorCritic(nn.Module):
         super(ActorCritic, self).__init__()
         self.hidden_size = hidden_size
         self.gru = nn.GRU(input_size, hidden_size, batch_first=True)
+        self.fc = nn.Linear(hidden_size, hidden_size)  # Added fully connected layer
+        self.relu = nn.ReLU()  # Added ReLU activation
         self.actor = nn.Linear(hidden_size, num_actions)
         self.critic = nn.Linear(hidden_size, 1)
     
@@ -160,6 +162,7 @@ class ActorCritic(nn.Module):
         x = x.unsqueeze(1)
         out, new_hidden = self.gru(x, hidden)
         out = out.squeeze(1)
+        out = self.relu(self.fc(out))  # Pass through fully connected layer and ReLU
         action_logits = self.actor(out)
         state_value = self.critic(out)
         return action_logits, state_value, new_hidden

@@ -313,13 +313,13 @@ if __name__ == "__main__":
             f.write(f"{order}\n")
     
     train_env = GridMazeEnv(reward_orders=training_reward_orders, training=True, max_steps=300)
-    model = ActorCritic(input_size=15, hidden_size=300, num_actions=4)
+    model = ActorCritic(input_size=15, hidden_size=64, num_actions=4)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     
     num_episodes = 100_000
     episode_rewards = train_agent(train_env, model, optimizer, num_episodes=num_episodes, gamma=0.99)
 
-    torch.save(model.state_dict(), "gru_outputs/lstm_actor_critic_ABCD.pth")
+    torch.save(model.state_dict(), "lstm_outputs/lstm_actor_critic_ABCD.pth")
 
     np.save("lstm_outputs/episode_rewards.npy", episode_rewards)
 
@@ -351,7 +351,7 @@ if __name__ == "__main__":
     test_results = []
     for idx, test_order in enumerate(unseen_orders):
         test_env = GridMazeEnv(reward_orders=training_reward_orders, training=False,
-                               fixed_reward_order=test_order, max_steps=200)
+                               fixed_reward_order=test_order, max_steps=300)
         timepoint_data = evaluate_agent(test_env, model)
         test_results.append(timepoint_data)
     
