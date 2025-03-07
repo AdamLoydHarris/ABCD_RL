@@ -5,8 +5,10 @@ import random
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.multiprocessing as mp
 import matplotlib.pyplot as plt
 import pickle
+
 # ------------------------------
 # Environment Definition
 # ------------------------------
@@ -145,21 +147,22 @@ class GridMazeEnv(gym.Env):
         return self._get_obs(), reward, done, info
 
 # ------------------------------
-# Actor-Critic Model with GRU
+# Actor-Critic Model with GRU (Direct Recurrent-to-Output)
 # ------------------------------
 class ActorCritic(nn.Module):
     def __init__(self, input_size=15, hidden_size=128, num_actions=4):
         super(ActorCritic, self).__init__()
         self.hidden_size = hidden_size
         self.gru = nn.GRU(input_size, hidden_size, batch_first=True)
+        # Directly use GRU output for policy and value estimates.
         self.actor = nn.Linear(hidden_size, num_actions)
         self.critic = nn.Linear(hidden_size, 1)
     
     def forward(self, x, hidden):
         # x: (batch_size, input_size); add time dimension.
-        x = x.unsqueeze(1)
+        x = x.unsqueeze(1)  # shape: (batch, 1, input_size)
         out, new_hidden = self.gru(x, hidden)
-        out = out.squeeze(1)
+        out = out.squeeze(1)  # shape: (batch, hidden_size)
         action_logits = self.actor(out)
         state_value = self.critic(out)
         return action_logits, state_value, new_hidden
@@ -168,71 +171,93 @@ class ActorCritic(nn.Module):
         return torch.zeros(1, batch_size, self.hidden_size)
 
 # ------------------------------
-# Training Loop
+# A3C Worker Function
 # ------------------------------
-def train_agent(env, model, optimizer, num_episodes=1000, gamma=0.99):
-    model.train()
-    episode_rewards = []
+def worker(worker_id, global_model, optimizer, global_ep, max_global_ep, training_reward_orders, gamma=0.99, n_steps=5):
+    """
+    Each worker runs its own environment and updates the global model asynchronously.
+    """
+    env = GridMazeEnv(reward_orders=training_reward_orders, training=True, max_steps=200)
+    local_model = ActorCritic(input_size=15, hidden_size=256, num_actions=4)
+    local_model.load_state_dict(global_model.state_dict())
     
-    for episode in range(num_episodes):
+    while True:
+        with global_ep.get_lock():
+            if global_ep.value >= max_global_ep:
+                break
         obs = env.reset()
         obs_tensor = torch.from_numpy(obs).float().unsqueeze(0)
-        hidden = model.init_hidden(batch_size=1)
+        hidden = local_model.init_hidden(batch_size=1)
         done = False
-        initial_max_steps = 50
-        max_steps_increment = 10
-        max_steps = initial_max_steps + (episode // 1000) * max_steps_increment
-        env.max_steps = min(max_steps, env.max_steps)
+        
         log_probs = []
         values = []
         rewards = []
         
-        while not done:
-            logits, value, hidden = model(obs_tensor, hidden)
+        # Run for up to n_steps or until episode terminates.
+        step_count = 0
+        while not done and step_count < n_steps:
+            logits, value, hidden = local_model(obs_tensor, hidden)
             dist = torch.distributions.Categorical(logits=logits)
             action = dist.sample()
             log_prob = dist.log_prob(action)
             
             obs_next, reward, done, _ = env.step(action.item())
-            obs_next_tensor = torch.from_numpy(obs_next).float().unsqueeze(0)
+            obs_tensor = torch.from_numpy(obs_next).float().unsqueeze(0)
             
             log_probs.append(log_prob)
             values.append(value)
             rewards.append(reward)
-            
-            obs_tensor = obs_next_tensor
+            step_count += 1
         
-        # Compute discounted returns.
-        R = 0
+        # Compute discounted return R. If episode didn't end, bootstrap from value.
+        if done:
+            R = 0.0
+        else:
+            with torch.no_grad():
+                _, R, _ = local_model(obs_tensor, hidden)
+                R = R.item()
         returns = []
         for r in rewards[::-1]:
             R = r + gamma * R
             returns.insert(0, R)
-        returns = torch.tensor(returns).float()
-        values = torch.cat(values).squeeze()
-        log_probs = torch.stack(log_probs)
+        returns = torch.tensor(returns)
+        values_tensor = torch.cat(values).squeeze()
+        log_probs_tensor = torch.stack(log_probs)
+        advantage = returns - values_tensor
         
-        advantage = returns - values
-        
-        actor_loss = -(log_probs * advantage.detach()).mean()
+        actor_loss = -(log_probs_tensor * advantage.detach()).mean()
         critic_loss = advantage.pow(2).mean()
-        loss = actor_loss + critic_loss
+        total_loss = actor_loss + critic_loss
         
         optimizer.zero_grad()
-        loss.backward()
+        total_loss.backward()
+        # Gradient clipping for stability.
+        nn.utils.clip_grad_norm_(local_model.parameters(), 1.0)
+        # Copy local gradients to global model.
+        for local_param, global_param in zip(local_model.parameters(), global_model.parameters()):
+            if global_param.grad is None:
+                global_param.grad = local_param.grad
+            else:
+                global_param.grad += local_param.grad
         optimizer.step()
+        # Sync local model with updated global model.
+        local_model.load_state_dict(global_model.state_dict())
         
-        total_reward = sum(rewards)
-        episode_rewards.append(total_reward)
-        if (episode + 1) % 100 == 0:
-            avg_reward = np.mean(episode_rewards[-100:])
-            avg_reward_per_step = avg_reward / env.max_steps
-            print(f"Episode {episode+1}, Avg Reward per Step: {avg_reward_per_step:.4f}")
-    
-    return episode_rewards
+        # Clear buffers
+        log_probs = []
+        values = []
+        rewards = []
+        
+        # Increment global episode counter if the episode ended.
+        if done:
+            with global_ep.get_lock():
+                global_ep.value += 1
+                current_ep = global_ep.value
+            print(f"Worker {worker_id} finished episode {current_ep}")
 
 # ------------------------------
-# Evaluation Function: Record Detailed Timepoint Data
+# Evaluation Function (Same as before)
 # ------------------------------
 def evaluate_agent(env, model):
     """
@@ -293,7 +318,7 @@ def evaluate_agent(env, model):
     return timepoint_data
 
 # ------------------------------
-# Plotting Function for Test Sessions
+# Plotting Function for Test Sessions (Same as before)
 # ------------------------------
 def plot_test_session(activations, reward_events, unit_order=None, session_idx=0):
     """
@@ -322,7 +347,7 @@ def plot_test_session(activations, reward_events, unit_order=None, session_idx=0
 # Main Script
 # ------------------------------
 if __name__ == "__main__":
-    # Training Setup:
+    # Set up training tasks.
     num_training_orders = 40
     training_reward_orders = []
     num_cells = 9
@@ -330,41 +355,31 @@ if __name__ == "__main__":
         order = random.sample(range(num_cells), 4)
         if order not in training_reward_orders:
             training_reward_orders.append(order)
-
-    with open("gru_outputs/training_tasks.txt", "w") as f:
-        for order in training_reward_orders:
-            f.write(f"{order}\n")
     
-    train_env = GridMazeEnv(reward_orders=training_reward_orders, training=True, max_steps=200)
-    model = ActorCritic(input_size=15, hidden_size=256, num_actions=4)
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    # Create a shared global model.
+    global_model = ActorCritic(input_size=15, hidden_size=256, num_actions=4)
+    global_model.share_memory()  # For multiprocessing
+    global_optimizer = optim.Adam(global_model.parameters(), lr=1e-3)
     
-    num_episodes = 100_000
-    episode_rewards = train_agent(train_env, model, optimizer, num_episodes=num_episodes, gamma=0.99)
-
-    torch.save(model.state_dict(), "gru_outputs/gru_actor_critic_ABCD.pth")
-
-    # Save episode rewards to a file.
-    np.save("gru_outputs/episode_rewards.npy", episode_rewards)
-
-    # Plot training reward over episodes.
-    plt.figure(figsize=(8, 4))
-    plt.plot(episode_rewards, label='Total Reward', c='gray', linewidth=0.5)
+    max_global_ep = 50000  # Total number of episodes to run across all workers.
+    num_workers = 4       # Number of parallel worker processes.
+    global_ep = mp.Value('i', 0)
     
-    rolling_avg = np.convolve(episode_rewards, np.ones(200)/200, mode='valid')
-    plt.plot(range(199, len(episode_rewards)), rolling_avg, color='red', label='Rolling Average (200 episodes)')
+    # Start worker processes.
+    processes = []
+    for worker_id in range(num_workers):
+        p = mp.Process(target=worker, args=(worker_id, global_model, global_optimizer,
+                                              global_ep, max_global_ep, training_reward_orders))
+        p.start()
+        processes.append(p)
+    for p in processes:
+        p.join()
     
-    plt.xlabel("Episode")
-    plt.ylabel("Total Reward")
-    plt.title("Reward over Episodes (Training)")
-    plt.legend()
-    plt.grid(True)
-    plt.savefig("gru_outputs/training_rewards_plot.svg")
-    plt.show()
-    # ------------------------------
-    # Test Sessions on Unseen tasks
-    # ------------------------------
-    # Generate 5 unseen tasks (not in the training set).
+    # Save the global model after training.
+    torch.save(global_model.state_dict(), "gru_outputs/gru_actor_critic_ABCD_a3c.pth")
+    
+    # (Optional) Evaluate the global model on unseen test tasks.
+    # Generate 5 unseen tasks.
     unseen_orders = []
     while len(unseen_orders) < 5:
         order = random.sample(range(num_cells), 4)
@@ -377,15 +392,13 @@ if __name__ == "__main__":
             f.write(f"{order}\n")
     
     test_results = []
-    # Run 5 test sessions.
     for idx, test_order in enumerate(unseen_orders):
         test_env = GridMazeEnv(reward_orders=training_reward_orders, training=False,
                                fixed_reward_order=test_order, max_steps=200)
-        # Get detailed timepoint data.
-        timepoint_data = evaluate_agent(test_env, model)
+        timepoint_data = evaluate_agent(test_env, global_model)
         test_results.append(timepoint_data)
     
-    # For each session, extract activations and reward events.
+    # Process and plot test session activations.
     sessions_activations = []
     sessions_reward_events = []
     for session in test_results:
@@ -394,8 +407,8 @@ if __name__ == "__main__":
         sessions_activations.append(activations)
         sessions_reward_events.append(reward_events)
     
-    # Rank order GRU units by peak activation time in the first test session.
-    first_activations = sessions_activations[0]  # shape: (T, hidden_size)
+    # Rank-order GRU units by peak activation time in the first test session.
+    first_activations = sessions_activations[0]
     peak_times = np.argmax(first_activations, axis=0)
     unit_order = np.argsort(peak_times)
     
@@ -403,7 +416,6 @@ if __name__ == "__main__":
     for idx, (acts, events) in enumerate(zip(sessions_activations, sessions_reward_events)):
         plot_test_session(acts, events, unit_order=unit_order, session_idx=idx)
     
-    # Optionally, save the detailed test data for future analysis.
-
+    # Save test session data for future analysis.
     with open("gru_outputs/test_sessions_data.pkl", "wb") as f:
         pickle.dump(test_results, f)
