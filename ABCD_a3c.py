@@ -182,6 +182,7 @@ def worker(worker_id, global_model, optimizer, global_ep, max_global_ep, trainin
     local_model.load_state_dict(global_model.state_dict())
     
     while True:
+        
         with global_ep.get_lock():
             if global_ep.value >= max_global_ep:
                 break
@@ -355,19 +356,24 @@ if __name__ == "__main__":
         order = random.sample(range(num_cells), 4)
         if order not in training_reward_orders:
             training_reward_orders.append(order)
+
+    with open("gru_outputs/training_tasks.txt", "w") as f:
+        for order in training_reward_orders:
+            f.write(f"{order}\n")
     
     # Create a shared global model.
     global_model = ActorCritic(input_size=15, hidden_size=256, num_actions=4)
     global_model.share_memory()  # For multiprocessing
     global_optimizer = optim.Adam(global_model.parameters(), lr=1e-3)
     
-    max_global_ep = 50000  # Total number of episodes to run across all workers.
+    max_global_ep = 5000  # Total number of episodes to run across all workers.
     num_workers = 4       # Number of parallel worker processes.
     global_ep = mp.Value('i', 0)
     
     # Start worker processes.
     processes = []
     for worker_id in range(num_workers):
+        print(f"Starting worker {worker_id}")
         p = mp.Process(target=worker, args=(worker_id, global_model, global_optimizer,
                                               global_ep, max_global_ep, training_reward_orders))
         p.start()

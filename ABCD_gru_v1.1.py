@@ -160,6 +160,7 @@ class ActorCritic(nn.Module):
         x = x.unsqueeze(1)
         out, new_hidden = self.gru(x, hidden)
         out = out.squeeze(1)
+
         action_logits = self.actor(out)
         state_value = self.critic(out)
         return action_logits, state_value, new_hidden
@@ -170,7 +171,7 @@ class ActorCritic(nn.Module):
 # ------------------------------
 # Training Loop
 # ------------------------------
-def train_agent(env, model, optimizer, num_episodes=1000, gamma=0.99):
+def train_agent(env, model, optimizer, num_episodes=1000, gamma=0.99, max_grad_norm=0.5):
     model.train()
     episode_rewards = []
     
@@ -179,10 +180,6 @@ def train_agent(env, model, optimizer, num_episodes=1000, gamma=0.99):
         obs_tensor = torch.from_numpy(obs).float().unsqueeze(0)
         hidden = model.init_hidden(batch_size=1)
         done = False
-        initial_max_steps = 50
-        max_steps_increment = 10
-        max_steps = initial_max_steps + (episode // 1000) * max_steps_increment
-        env.max_steps = min(max_steps, env.max_steps)
         log_probs = []
         values = []
         rewards = []
@@ -220,14 +217,14 @@ def train_agent(env, model, optimizer, num_episodes=1000, gamma=0.99):
         
         optimizer.zero_grad()
         loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         optimizer.step()
         
         total_reward = sum(rewards)
         episode_rewards.append(total_reward)
         if (episode + 1) % 100 == 0:
             avg_reward = np.mean(episode_rewards[-100:])
-            avg_reward_per_step = avg_reward / env.max_steps
-            print(f"Episode {episode+1}, Avg Reward per Step: {avg_reward_per_step:.4f}")
+            print(f"Episode {episode+1}, Avg Reward: {avg_reward:.2f}")
     
     return episode_rewards
 
@@ -336,11 +333,11 @@ if __name__ == "__main__":
             f.write(f"{order}\n")
     
     train_env = GridMazeEnv(reward_orders=training_reward_orders, training=True, max_steps=200)
-    model = ActorCritic(input_size=15, hidden_size=256, num_actions=4)
+    model = ActorCritic(input_size=15, hidden_size=700, num_actions=4)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     
     num_episodes = 100_000
-    episode_rewards = train_agent(train_env, model, optimizer, num_episodes=num_episodes, gamma=0.99)
+    episode_rewards = train_agent(train_env, model, optimizer, num_episodes=num_episodes, gamma=0.99, max_grad_norm=0.5)
 
     torch.save(model.state_dict(), "gru_outputs/gru_actor_critic_ABCD.pth")
 
@@ -380,7 +377,7 @@ if __name__ == "__main__":
     # Run 5 test sessions.
     for idx, test_order in enumerate(unseen_orders):
         test_env = GridMazeEnv(reward_orders=training_reward_orders, training=False,
-                               fixed_reward_order=test_order, max_steps=200)
+                               fixed_reward_order=test_order, max_steps=400)
         # Get detailed timepoint data.
         timepoint_data = evaluate_agent(test_env, model)
         test_results.append(timepoint_data)
