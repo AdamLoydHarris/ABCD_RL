@@ -333,8 +333,8 @@ if __name__ == "__main__":
             f.write(f"{order}\n")
     
     train_env = GridMazeEnv(reward_orders=training_reward_orders, training=True, max_steps=200)
-    model = ActorCritic(input_size=15, hidden_size=700, num_actions=4)
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    model = ActorCritic(input_size=15, hidden_size=1000, num_actions=4)
+    optimizer = optim.Adam(model.parameters(), lr=1e-4)
     
     num_episodes = 100_000
     episode_rewards = train_agent(train_env, model, optimizer, num_episodes=num_episodes, gamma=0.99, max_grad_norm=0.5)
