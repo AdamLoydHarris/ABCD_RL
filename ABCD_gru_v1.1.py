@@ -336,7 +336,7 @@ if __name__ == "__main__":
     model = ActorCritic(input_size=15, hidden_size=500, num_actions=4)
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
     
-    num_episodes = 100_000
+    num_episodes = 250_000
     episode_rewards = train_agent(train_env, model, optimizer, num_episodes=num_episodes, gamma=0.99, max_grad_norm=0.5)
 
     torch.save(model.state_dict(), "gru_outputs/gru_actor_critic_ABCD.pth")
@@ -377,7 +377,7 @@ if __name__ == "__main__":
     # Run 5 test sessions.
     for idx, test_order in enumerate(unseen_orders):
         test_env = GridMazeEnv(reward_orders=training_reward_orders, training=False,
-                               fixed_reward_order=test_order, max_steps=400)
+                               fixed_reward_order=test_order, max_steps=200)
         # Get detailed timepoint data.
         timepoint_data = evaluate_agent(test_env, model)
         test_results.append(timepoint_data)
