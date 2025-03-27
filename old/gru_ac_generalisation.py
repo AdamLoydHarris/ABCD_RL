@@ -243,7 +243,7 @@ def evaluate_agent(env, model):
 
 if __name__ == "__main__":
     # Generate 30 random training reward orders.
-    num_training_orders = 30
+    num_training_orders = 300
     training_reward_orders = []
     num_cells = 9
     while len(training_reward_orders) < num_training_orders:

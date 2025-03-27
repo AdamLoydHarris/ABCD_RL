@@ -320,7 +320,7 @@ def plot_test_session(activations, reward_events, unit_order=None, session_idx=0
 # ------------------------------
 if __name__ == "__main__":
     # Training Setup:
-    num_training_orders = 40
+    num_training_orders = 300
     training_reward_orders = []
     num_cells = 9
     while len(training_reward_orders) < num_training_orders:
@@ -336,7 +336,7 @@ if __name__ == "__main__":
     model = ActorCritic(input_size=15, hidden_size=500, num_actions=4)
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
     
-    num_episodes = 250_000
+    num_episodes = 500_000
     episode_rewards = train_agent(train_env, model, optimizer, num_episodes=num_episodes, gamma=0.99, max_grad_norm=0.5)
 
     torch.save(model.state_dict(), "gru_outputs/gru_actor_critic_ABCD.pth")
