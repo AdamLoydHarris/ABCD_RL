@@ -292,12 +292,13 @@ def evaluate_agent(env, model):
 # ------------------------------
 # Plotting Function for Test Sessions
 # ------------------------------
-def plot_test_session(activations, reward_events, unit_order=None, session_idx=0):
+def plot_test_session(activations, reward_events, unit_order=None, session_idx=0, save_path=None):
     """
     Plots a heatmap of GRU activations (rank-ordered if unit_order is provided)
     and overlays vertical lines for reward events.
     
     Reward colors: A - red, B - yellow, C - green, D - blue.
+    Optionally saves the plot to a file if save_path is provided.
     """
     if unit_order is not None:
         activations = activations[:, unit_order]
@@ -313,6 +314,10 @@ def plot_test_session(activations, reward_events, unit_order=None, session_idx=0
     for t, label in reward_events:
         if label in reward_colors:
             plt.axvline(x=t, color=reward_colors[label], linestyle='--', linewidth=2)
+    
+    if save_path:
+        plt.savefig(save_path, bbox_inches='tight')
+    
     plt.show()
 
 # ------------------------------
@@ -320,7 +325,7 @@ def plot_test_session(activations, reward_events, unit_order=None, session_idx=0
 # ------------------------------
 if __name__ == "__main__":
     # Training Setup:
-    num_training_orders = 300
+    num_training_orders = 400
     training_reward_orders = []
     num_cells = 9
     while len(training_reward_orders) < num_training_orders:
@@ -336,7 +341,7 @@ if __name__ == "__main__":
     model = ActorCritic(input_size=15, hidden_size=500, num_actions=4)
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
     
-    num_episodes = 500_000
+    num_episodes = 1_000_000
     episode_rewards = train_agent(train_env, model, optimizer, num_episodes=num_episodes, gamma=0.99, max_grad_norm=0.5)
 
     torch.save(model.state_dict(), "gru_outputs/gru_actor_critic_ABCD.pth")
@@ -361,9 +366,10 @@ if __name__ == "__main__":
     # ------------------------------
     # Test Sessions on Unseen tasks
     # ------------------------------
-    # Generate 5 unseen tasks (not in the training set).
+    # Generate unseen tasks (not in the training set).
     unseen_orders = []
-    while len(unseen_orders) < 5:
+    num_test_orders = 40
+    while len(unseen_orders) < num_test_orders:
         order = random.sample(range(num_cells), 4)
         if order not in training_reward_orders and order not in unseen_orders:
             unseen_orders.append(order)
@@ -398,7 +404,7 @@ if __name__ == "__main__":
     
     # Plot heatmaps for each test session using the same unit order.
     for idx, (acts, events) in enumerate(zip(sessions_activations, sessions_reward_events)):
-        plot_test_session(acts, events, unit_order=unit_order, session_idx=idx)
+        plot_test_session(acts, events, unit_order=unit_order, session_idx=idx, save_path=f"gru_outputs/test_session_{idx+1}.svg")
     
     # Optionally, save the detailed test data for future analysis.
 
